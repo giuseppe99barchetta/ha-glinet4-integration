@@ -67,6 +67,36 @@ class DeviceInterfaceType(StrEnum):
     WIFI_6_GUEST = "6GHz Guest"
 
 
+DEVICE_INTERFACE_TYPES: tuple[DeviceInterfaceType, ...] = (
+    DeviceInterfaceType.WIFI_24,
+    DeviceInterfaceType.WIFI_5,
+    DeviceInterfaceType.LAN,
+    DeviceInterfaceType.WIFI_24_GUEST,
+    DeviceInterfaceType.WIFI_5_GUEST,
+    DeviceInterfaceType.UNKNOWN,
+    DeviceInterfaceType.DONGLE,
+    DeviceInterfaceType.BYPASS_ROUTE,
+    DeviceInterfaceType.UNKNOWN2,
+    DeviceInterfaceType.MLO,
+    DeviceInterfaceType.MLO_GUEST,
+    DeviceInterfaceType.WIFI_6,
+    DeviceInterfaceType.WIFI_6_GUEST,
+)
+
+
+def _device_interface_type(raw_interface_type: object) -> DeviceInterfaceType:
+    """Return the interface type for a router API interface type code."""
+    try:
+        interface_type = int(raw_interface_type)
+    except (TypeError, ValueError):
+        return DeviceInterfaceType.UNKNOWN
+
+    if 0 <= interface_type < len(DEVICE_INTERFACE_TYPES):
+        return DEVICE_INTERFACE_TYPES[interface_type]
+
+    return DeviceInterfaceType.UNKNOWN
+
+
 class GLinetRouter:
     """representation of a GLinet router.
 
@@ -625,9 +655,7 @@ class ClientDevInfo:
             self._ip_address = dev_info.get("ip")
             self._last_activity = now
             self._connected = dev_info.get("online", False)
-            self._if_type = list(DeviceInterfaceType)[
-                dev_info.get("type", 5)
-            ]  # TODO be more index safe
+            self._if_type = _device_interface_type(dev_info.get("type", 5))
         # a device might not actually be online but we want to consider it home
         elif self._connected:
             self._connected = (
