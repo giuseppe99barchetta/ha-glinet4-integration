@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
+from functools import cache
 import logging
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -66,35 +67,61 @@ class DeviceInterfaceType(StrEnum):
     WIFI_6 = "6GHz"
     WIFI_6_GUEST = "6GHz Guest"
 
+    @classmethod
+    def from_index(
+        cls,
+        raw_interface_type: object,
+        *,
+        router_model: str,
+        router_firmware: str,
+        dev_info: dict,
+    ) -> DeviceInterfaceType:
+        """Return interface type for a router API index, or UNKNOWN if unsupported."""
+        interface_type: int | None = None
+        if isinstance(raw_interface_type, int) and not isinstance(
+            raw_interface_type, bool
+        ):
+            interface_type = raw_interface_type
+        elif isinstance(raw_interface_type, str):
+            try:
+                interface_type = int(raw_interface_type)
+            except ValueError:
+                interface_type = None
 
-DEVICE_INTERFACE_TYPES: tuple[DeviceInterfaceType, ...] = (
-    DeviceInterfaceType.WIFI_24,
-    DeviceInterfaceType.WIFI_5,
-    DeviceInterfaceType.LAN,
-    DeviceInterfaceType.WIFI_24_GUEST,
-    DeviceInterfaceType.WIFI_5_GUEST,
-    DeviceInterfaceType.UNKNOWN,
-    DeviceInterfaceType.DONGLE,
-    DeviceInterfaceType.BYPASS_ROUTE,
-    DeviceInterfaceType.UNKNOWN2,
-    DeviceInterfaceType.MLO,
-    DeviceInterfaceType.MLO_GUEST,
-    DeviceInterfaceType.WIFI_6,
-    DeviceInterfaceType.WIFI_6_GUEST,
-)
+        # __members__ preserves aliases and declaration order, unlike Enum iteration.
+        interface_types = tuple(cls.__members__.values())
+        if interface_type is not None and 0 <= interface_type < len(interface_types):
+            return interface_types[interface_type]
 
+        cls._log_unsupported(
+            repr(raw_interface_type),
+            router_model,
+            router_firmware,
+            repr(dev_info.get("online")),
+            tuple(sorted(str(key) for key in dev_info)),
+        )
+        return cls.UNKNOWN
 
-def _device_interface_type(raw_interface_type: object) -> DeviceInterfaceType:
-    """Return the interface type for a router API interface type code."""
-    try:
-        interface_type = int(raw_interface_type)
-    except (TypeError, ValueError):
-        return DeviceInterfaceType.UNKNOWN
-
-    if 0 <= interface_type < len(DEVICE_INTERFACE_TYPES):
-        return DEVICE_INTERFACE_TYPES[interface_type]
-
-    return DeviceInterfaceType.UNKNOWN
+    @staticmethod
+    @cache
+    def _log_unsupported(
+        raw_interface_type: str,
+        router_model: str,
+        router_firmware: str,
+        client_online: str,
+        dev_info_fields: tuple[str, ...],
+    ) -> None:
+        """Log each unsupported interface context once to avoid poll-time spam."""
+        _LOGGER.warning(
+            "Unsupported device interface type %s reported by GL-iNet router model %s "
+            "(firmware %s; client online=%s; dev_info fields=%s). Using Unknown. "
+            "Please open an issue with this log so support can be added",
+            raw_interface_type,
+            router_model,
+            router_firmware,
+            client_online,
+            dev_info_fields,
+        )
 
 
 class GLinetRouter:
@@ -375,7 +402,12 @@ class GLinetRouter:
         # TODO - ensure the output of gli4py devices has the correct data structure
         for device_mac, device in self._devices.items():
             dev_info = wrt_devices.get(device_mac)
-            device.update(dev_info, consider_home)
+            device.update(
+                dev_info,
+                consider_home,
+                router_model=self._model,
+                router_firmware=self._sw_v,
+            )
 
         for device_mac, dev_info in wrt_devices.items():
             # Skip if we've already have this device
@@ -390,7 +422,11 @@ class GLinetRouter:
 
             new_device = True
             device = ClientDevInfo(device_mac)
-            device.update(dev_info)
+            device.update(
+                dev_info,
+                router_model=self._model,
+                router_firmware=self._sw_v,
+            )
             self._devices[device_mac] = device
 
         async_dispatcher_send(self.hass, self.signal_device_update)
@@ -637,7 +673,14 @@ class ClientDevInfo:
         self._connected: bool = False
         self._if_type: DeviceInterfaceType = DeviceInterfaceType.UNKNOWN
 
-    def update(self, dev_info: dict | None = None, consider_home: int = 0) -> None:
+    def update(
+        self,
+        dev_info: dict | None = None,
+        consider_home: int = 0,
+        *,
+        router_model: str = "UNKNOWN",
+        router_firmware: str = "UNKNOWN",
+    ) -> None:
         """Update connected device info."""
         now: datetime = dt_util.utcnow()
         if dev_info:
@@ -655,7 +698,12 @@ class ClientDevInfo:
             self._ip_address = dev_info.get("ip")
             self._last_activity = now
             self._connected = dev_info.get("online", False)
-            self._if_type = _device_interface_type(dev_info.get("type", 5))
+            self._if_type = DeviceInterfaceType.from_index(
+                dev_info.get("type", 5),
+                router_model=router_model,
+                router_firmware=router_firmware,
+                dev_info=dev_info,
+            )
         # a device might not actually be online but we want to consider it home
         elif self._connected:
             self._connected = (
